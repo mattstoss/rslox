@@ -92,8 +92,14 @@ mod tests {
     use super::*;
     use TokenKind::*;
 
+    struct TestCase {
+        name: &'static str,
+        input: &'static str,
+        assertion: Box<dyn Matcher>,
+    }
+
     trait Matcher {
-        fn check(&self, input: &str, result: &Result<Vec<Token>>);
+        fn check(&self, result: &Result<Vec<Token>>) -> Result<()>;
     }
 
     struct TokenKindMatcher {
@@ -101,17 +107,25 @@ mod tests {
     }
 
     impl Matcher for TokenKindMatcher {
-        fn check(&self, input: &str, result: &Result<Vec<Token>>) {
+        fn check(&self, result: &Result<Vec<Token>>) -> Result<()> {
             match result {
                 Ok(tokens) => {
                     let actual: Vec<TokenKind> =
                         tokens.into_iter().map(|t| t.kind.clone()).collect();
-                    assert_eq!(actual, self.expected, "Failed on input: \"{}\"", input);
+
+                    if actual == self.expected {
+                        Ok(())
+                    } else {
+                        bail!(
+                            "Token kinds did not match.\nExpected: {:?}\n  Actual: {:?}",
+                            self.expected,
+                            actual
+                        );
+                    }
                 }
-                Err(e) => panic!(
-                    "Failed on input: \"{}\". Expected success but got error: {}",
-                    input, e
-                ),
+                Err(e) => {
+                    bail!("Expected success, but the scan failed with: {}", e);
+                }
             }
         }
     }
@@ -121,21 +135,22 @@ mod tests {
     }
 
     impl Matcher for ErrorMsgMatcher {
-        fn check(&self, input: &str, result: &Result<Vec<Token>>) {
+        fn check(&self, result: &Result<Vec<Token>>) -> Result<()> {
             match result {
-                Ok(_) => panic!(
-                    "Failed on input: \"{}\". Expected error but got success.",
-                    input
-                ),
+                Ok(_) => {
+                    bail!("Expected a scan error, but the operation succeeded.");
+                }
                 Err(e) => {
                     let actual_msg = e.to_string();
-                    assert!(
-                        actual_msg.contains(&self.expected),
-                        "Failed on input: \"{}\". Expected error '{}', but got '{}'",
-                        input,
-                        self.expected,
-                        actual_msg
-                    );
+                    if actual_msg.contains(&self.expected) {
+                        Ok(())
+                    } else {
+                        bail!(
+                            "Error message did not match.\nExpected to contain: \"{}\"\n           Actual: \"{}\"",
+                            self.expected,
+                            actual_msg
+                        );
+                    }
                 }
             }
         }
@@ -165,81 +180,151 @@ mod tests {
         };
     }
 
-    fn run_test(test_cases: &[(&str, Box<dyn Matcher>)]) {
-        for (input, matcher) in test_cases {
-            let result = scan(input);
-            matcher.check(input, &result);
+    fn run_test_internal(test_cases: &[TestCase]) {
+        for tc in test_cases {
+            let scan_result = scan(tc.input); // The input is used here...
+
+            let check_result = tc.assertion.check(&scan_result);
+
+            if let Err(error_message) = check_result {
+                panic!(
+                    "\n\n- Test Case Failed: '{}'\n- Input: '{}'\n- Reason: {}\n\n",
+                    tc.name, tc.input, error_message
+                );
+            }
         }
+    }
+
+    macro_rules! run_tests {
+        ($($test_case:expr),* $(,)?) => {
+            run_test_internal(&[$($test_case),*])
+        };
     }
 
     #[test]
     fn ignores_whitespace() {
-        run_test(&[
-            // === Different Whitespace Characters ===
-            ("    ", token_kinds_eq!(EndOfFile)),
-            ("\t\t", token_kinds_eq!(EndOfFile)),
-            ("\n\n", token_kinds_eq!(EndOfFile)),
-            ("\r\r", token_kinds_eq!(EndOfFile)),
-            (" \t \n \r ", token_kinds_eq!(EndOfFile)),
-            // === Whitespace Around Tokens ===
-            ("   + ", token_kinds_eq!(Plus, EndOfFile)),
-            ("+   ", token_kinds_eq!(Plus, EndOfFile)),
-            ("  +  ", token_kinds_eq!(Plus, EndOfFile)),
-            (
-                "10 + 20",
-                token_kinds_eq!(Number(10), Plus, Number(20), EndOfFile),
-            ),
-            (
-                " 10\t+\n20\r ",
-                token_kinds_eq!(Number(10), Plus, Number(20), EndOfFile),
-            ),
-            // === Edge Cases ===
-            ("", token_kinds_eq!(EndOfFile)),
-        ])
+        run_tests!(
+            TestCase {
+                name: "success - only spaces",
+                input: "  ",
+                assertion: token_kinds_eq!(EndOfFile),
+            },
+            TestCase {
+                name: "success - only tabs",
+                input: "\t\t",
+                assertion: token_kinds_eq!(EndOfFile),
+            },
+            TestCase {
+                name: "success - only newlines",
+                input: "\n\n",
+                assertion: token_kinds_eq!(EndOfFile),
+            },
+            TestCase {
+                name: "success - only carriage returns",
+                input: "\r\r",
+                assertion: token_kinds_eq!(EndOfFile),
+            },
+            TestCase {
+                name: "success - mixed whitespace",
+                input: " \t \n \r ",
+                assertion: token_kinds_eq!(EndOfFile),
+            },
+            TestCase {
+                name: "success - leading whitespace",
+                input: "  + ",
+                assertion: token_kinds_eq!(Plus, EndOfFile),
+            },
+            TestCase {
+                name: "success - trailing whitespace",
+                input: "+  ",
+                assertion: token_kinds_eq!(Plus, EndOfFile),
+            },
+            TestCase {
+                name: "success - surrounding whitespace",
+                input: " +  ",
+                assertion: token_kinds_eq!(Plus, EndOfFile),
+            },
+            TestCase {
+                name: "success - whitespace between numbers",
+                input: "10 + 20",
+                assertion: token_kinds_eq!(Number(10), Plus, Number(20), EndOfFile),
+            },
+            TestCase {
+                name: "success - mixed whitespace between numbers",
+                input: " 10\t+\n20\r ",
+                assertion: token_kinds_eq!(Number(10), Plus, Number(20), EndOfFile),
+            },
+            TestCase {
+                name: "success - empty input",
+                input: "",
+                assertion: token_kinds_eq!(EndOfFile),
+            },
+        )
     }
 
     #[test]
     fn number_literal() {
-        run_test(&[
-            // === Basic Cases ===
-            ("4", token_kinds_eq!(Number(4), EndOfFile)),
-            ("44", token_kinds_eq!(Number(44), EndOfFile)),
-            // === Edge Cases ===
-            ("0", token_kinds_eq!(Number(0), EndOfFile)),
-            ("2147483647", token_kinds_eq!(Number(i32::MAX), EndOfFile)),
-            // === Contextual Cases ===
-            (
-                "12 + 345",
-                token_kinds_eq!(Number(12), Plus, Number(345), EndOfFile),
-            ),
-            // === Error cases ===
-            ("0ddd", error_msg_eq!("unrecognized token: 'd'")),
-        ])
+        run_tests!(
+            TestCase {
+                name: "success - single digit",
+                input: "4",
+                assertion: token_kinds_eq!(Number(4), EndOfFile),
+            },
+            TestCase {
+                name: "success - multiple digits",
+                input: "44",
+                assertion: token_kinds_eq!(Number(44), EndOfFile),
+            },
+            TestCase {
+                name: "success - zero",
+                input: "0",
+                assertion: token_kinds_eq!(Number(0), EndOfFile),
+            },
+            TestCase {
+                name: "success - max i32 value",
+                input: "2147483647",
+                assertion: token_kinds_eq!(Number(i32::MAX), EndOfFile),
+            },
+            TestCase {
+                name: "success - numbers in an expression",
+                input: "12 + 345",
+                assertion: token_kinds_eq!(Number(12), Plus, Number(345), EndOfFile),
+            },
+            TestCase {
+                name: "failure - invalid character after a number",
+                input: "0d",
+                assertion: error_msg_eq!("unrecognized token: 'd'"),
+            },
+        )
     }
 
     #[test]
     fn addition() {
-        run_test(&[
-            // Single add
-            (
-                "8 + 2",
-                token_kinds_eq!(Number(8), Plus, Number(2), EndOfFile),
-            ),
-            // Multi add
-            (
-                "8 + 2 + 1",
-                token_kinds_eq!(Number(8), Plus, Number(2), Plus, Number(1), EndOfFile),
-            ),
-            // Multidigit add
-            (
-                "882 + 2",
-                token_kinds_eq!(Number(882), Plus, Number(2), EndOfFile),
-            ),
-        ])
+        run_tests!(
+            TestCase {
+                name: "success - simple addition",
+                input: "8 + 2",
+                assertion: token_kinds_eq!(Number(8), Plus, Number(2), EndOfFile),
+            },
+            TestCase {
+                name: "success - chained addition",
+                input: "8 + 2 + 1",
+                assertion: token_kinds_eq!(Number(8), Plus, Number(2), Plus, Number(1), EndOfFile),
+            },
+            TestCase {
+                name: "success - multi-digit addition",
+                input: "882 + 2",
+                assertion: token_kinds_eq!(Number(882), Plus, Number(2), EndOfFile),
+            },
+        )
     }
 
     #[test]
     fn errors() {
-        run_test(&[("?", error_msg_eq!("unrecognized token: '?'"))]);
+        run_tests!(TestCase {
+            name: "failures - unrecognized single character",
+            input: "?",
+            assertion: error_msg_eq!("unrecognized token: '?'"),
+        });
     }
 }
