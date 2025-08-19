@@ -11,6 +11,21 @@ struct Scanner {
     current: usize,
 }
 
+fn equals(ch: char) -> impl Fn(char) -> bool {
+    let predicate = move |c| c == ch;
+    predicate
+}
+
+fn is_numeric() -> impl Fn(char) -> bool {
+    let predicate = move |c: char| c.is_numeric();
+    predicate
+}
+
+fn is_whitespace() -> impl Fn(char) -> bool {
+    let predicate = move |c: char| c.is_whitespace();
+    predicate
+}
+
 impl Scanner {
     fn new(input: &str) -> Self {
         Self {
@@ -42,14 +57,37 @@ impl Scanner {
             return self.token(TokenKind::EndOfFile);
         }
 
-        let ch = self.eat_next_token();
+        let ch = self.eat_next();
         match ch {
+            '(' => self.token(TokenKind::LeftParen),
+            ')' => self.token(TokenKind::RightParen),
+            '{' => self.token(TokenKind::LeftBrace),
+            '}' => self.token(TokenKind::RightBrace),
+            ',' => self.token(TokenKind::Comma),
+            '.' => self.token(TokenKind::Dot),
+            ';' => self.token(TokenKind::Semicolon),
+            '-' => self.token(TokenKind::Minus),
             '+' => self.token(TokenKind::Plus),
+            '!' => match self.try_eat_next(equals('=')) {
+                Some(_) => self.token(TokenKind::BangEqual),
+                None => self.token(TokenKind::Bang),
+            },
+            '=' => match self.try_eat_next(equals('=')) {
+                Some(_) => self.token(TokenKind::EqualEqual),
+                None => self.token(TokenKind::Equal),
+            },
+            '<' => match self.try_eat_next(equals('=')) {
+                Some(_) => self.token(TokenKind::LessEqual),
+                None => self.token(TokenKind::Less),
+            },
+            '>' => match self.try_eat_next(equals('=')) {
+                Some(_) => self.token(TokenKind::GreaterEqual),
+                None => self.token(TokenKind::Greater),
+            },
             ch if ch.is_numeric() => {
                 let mut literal = String::from(ch);
-                while !self.is_at_end() && self.next().is_numeric() {
-                    literal.push(self.next());
-                    self.advance()
+                while let Some(ch) = self.try_eat_next(is_numeric()) {
+                    literal.push(ch);
                 }
                 let number = literal.parse::<i32>()?;
                 self.token(TokenKind::Number(number))
@@ -59,19 +97,31 @@ impl Scanner {
     }
 
     fn consume_whitespace(&mut self) {
-        while !self.is_at_end() && self.next().is_whitespace() {
-            self.advance()
-        }
+        while self.try_eat_next(is_whitespace()).is_some() {}
     }
 
     fn token(&self, kind: TokenKind) -> Result<Token> {
         Ok(Token { kind })
     }
 
-    fn eat_next_token(&mut self) -> char {
+    fn eat_next(&mut self) -> char {
         let c = self.next();
         self.advance();
         c
+    }
+
+    fn try_eat_next(&mut self, predicate: impl Fn(char) -> bool) -> Option<char> {
+        if self.is_at_end() {
+            return None;
+        }
+
+        let ch = self.next();
+        if predicate(ch) {
+            self.advance();
+            return Some(ch);
+        }
+
+        None
     }
 
     fn next(&self) -> char {
@@ -315,6 +365,58 @@ mod tests {
                 name: "success - multi-digit addition",
                 input: "882 + 2",
                 assertion: token_kinds_eq!(Number(882), Plus, Number(2), EndOfFile),
+            },
+        )
+    }
+
+    #[test]
+    fn single_character() {
+        run_tests!(
+            TestCase {
+                name: "success - parenthesis",
+                input: "()",
+                assertion: token_kinds_eq!(LeftParen, RightParen, EndOfFile),
+            },
+            TestCase {
+                name: "success - brace",
+                input: "{}",
+                assertion: token_kinds_eq!(LeftBrace, RightBrace, EndOfFile),
+            },
+            TestCase {
+                name: "success - punctuation",
+                input: ",.;",
+                assertion: token_kinds_eq!(Comma, Dot, Semicolon, EndOfFile),
+            },
+            TestCase {
+                name: "success - operators",
+                input: "-+",
+                assertion: token_kinds_eq!(Minus, Plus, EndOfFile),
+            },
+        )
+    }
+
+    #[test]
+    fn multi_character() {
+        run_tests!(
+            TestCase {
+                name: "success - bang equal",
+                input: "!=!",
+                assertion: token_kinds_eq!(BangEqual, Bang, EndOfFile),
+            },
+            TestCase {
+                name: "success - equal equal",
+                input: "===",
+                assertion: token_kinds_eq!(EqualEqual, Equal, EndOfFile),
+            },
+            TestCase {
+                name: "success - less equal",
+                input: "<<==",
+                assertion: token_kinds_eq!(Less, LessEqual, Equal, EndOfFile),
+            },
+            TestCase {
+                name: "success - greater equal",
+                input: ">>==",
+                assertion: token_kinds_eq!(Greater, GreaterEqual, Equal, EndOfFile),
             },
         )
     }
