@@ -1,3 +1,5 @@
+use std::mem;
+
 use anyhow::{Result, bail};
 
 use crate::token::{Token, TokenKind};
@@ -9,6 +11,7 @@ pub fn scan(input: &str) -> Result<Vec<Token>> {
 struct Scanner {
     input: Vec<char>,
     current: usize,
+    tokens: Vec<Token>,
 }
 
 fn equals(ch: char) -> impl Fn(char) -> bool {
@@ -21,8 +24,23 @@ fn is_numeric() -> impl Fn(char) -> bool {
     predicate
 }
 
+fn is_alphabetic() -> impl Fn(char) -> bool {
+    let predicate = move |c: char| c.is_alphabetic();
+    predicate
+}
+
 fn is_whitespace() -> impl Fn(char) -> bool {
     let predicate = move |c: char| c.is_whitespace();
+    predicate
+}
+
+fn is_not_newline() -> impl Fn(char) -> bool {
+    let predicate = move |c: char| c != '\n';
+    predicate
+}
+
+fn is_not_double_quote() -> impl Fn(char) -> bool {
+    let predicate = move |c: char| c != '"';
     predicate
 }
 
@@ -31,77 +49,128 @@ impl Scanner {
         Self {
             input: input.to_string().chars().collect(),
             current: 0,
+            tokens: Vec::new(),
         }
     }
 
     fn scan(&mut self) -> Result<Vec<Token>> {
-        let mut tokens = Vec::new();
-
         loop {
-            let next_token = self.scan_next_token()?;
-            let is_end = matches!(next_token.kind, TokenKind::EndOfFile);
-            tokens.push(next_token);
-
-            if is_end {
-                break;
+            self.scan_next_token()?;
+            if self.is_at_end() {
+                self.add_token(TokenKind::EndOfFile);
+                return Ok(mem::take(&mut self.tokens));
             }
         }
-
-        Ok(tokens)
     }
 
-    fn scan_next_token(&mut self) -> Result<Token> {
+    fn scan_next_token(&mut self) -> Result<()> {
         self.consume_whitespace();
-
         if self.is_at_end() {
-            return self.token(TokenKind::EndOfFile);
+            return Ok(());
         }
 
         let ch = self.eat_next();
         match ch {
-            '(' => self.token(TokenKind::LeftParen),
-            ')' => self.token(TokenKind::RightParen),
-            '{' => self.token(TokenKind::LeftBrace),
-            '}' => self.token(TokenKind::RightBrace),
-            ',' => self.token(TokenKind::Comma),
-            '.' => self.token(TokenKind::Dot),
-            ';' => self.token(TokenKind::Semicolon),
-            '-' => self.token(TokenKind::Minus),
-            '+' => self.token(TokenKind::Plus),
+            '(' => self.add_token(TokenKind::LeftParen),
+            ')' => self.add_token(TokenKind::RightParen),
+            '{' => self.add_token(TokenKind::LeftBrace),
+            '}' => self.add_token(TokenKind::RightBrace),
+            ',' => self.add_token(TokenKind::Comma),
+            '.' => self.add_token(TokenKind::Dot),
+            ';' => self.add_token(TokenKind::Semicolon),
+            '-' => self.add_token(TokenKind::Minus),
+            '+' => self.add_token(TokenKind::Plus),
+            '*' => self.add_token(TokenKind::Star),
+            '/' => match self.try_eat_next(equals('/')) {
+                Some(_) => self.consume_single_line_comment(),
+                None => self.add_token(TokenKind::Slash),
+            },
             '!' => match self.try_eat_next(equals('=')) {
-                Some(_) => self.token(TokenKind::BangEqual),
-                None => self.token(TokenKind::Bang),
+                Some(_) => self.add_token(TokenKind::BangEqual),
+                None => self.add_token(TokenKind::Bang),
             },
             '=' => match self.try_eat_next(equals('=')) {
-                Some(_) => self.token(TokenKind::EqualEqual),
-                None => self.token(TokenKind::Equal),
+                Some(_) => self.add_token(TokenKind::EqualEqual),
+                None => self.add_token(TokenKind::Equal),
             },
             '<' => match self.try_eat_next(equals('=')) {
-                Some(_) => self.token(TokenKind::LessEqual),
-                None => self.token(TokenKind::Less),
+                Some(_) => self.add_token(TokenKind::LessEqual),
+                None => self.add_token(TokenKind::Less),
             },
             '>' => match self.try_eat_next(equals('=')) {
-                Some(_) => self.token(TokenKind::GreaterEqual),
-                None => self.token(TokenKind::Greater),
+                Some(_) => self.add_token(TokenKind::GreaterEqual),
+                None => self.add_token(TokenKind::Greater),
             },
+            '"' => {
+                let start = self.current;
+
+                self.consume_while(is_not_double_quote());
+                if self.is_at_end() {
+                    // FIXME: better error message for unterminated strings
+                    bail!("unterminated string")
+                }
+                self.advance();
+
+                let end = self.current - 1;
+
+                let string = self.input[start..end].iter().collect();
+                self.add_token(TokenKind::String(string));
+            }
             ch if ch.is_numeric() => {
                 let mut literal = String::from(ch);
                 while let Some(ch) = self.try_eat_next(is_numeric()) {
                     literal.push(ch);
                 }
                 let number = literal.parse::<i32>()?;
-                self.token(TokenKind::Number(number))
+                self.add_token(TokenKind::Number(number))
+            }
+            ch if ch.is_alphabetic() => {
+                let mut word = String::from(ch);
+                while let Some(ch) = self.try_eat_next(is_alphabetic()) {
+                    word.push(ch);
+                }
+
+                match word.as_str() {
+                    "and" => self.add_token(TokenKind::And),
+                    "class" => self.add_token(TokenKind::Class),
+                    "else" => self.add_token(TokenKind::Else),
+                    "false" => self.add_token(TokenKind::False),
+                    "for" => self.add_token(TokenKind::For),
+                    "fun" => self.add_token(TokenKind::Fun),
+                    "if" => self.add_token(TokenKind::If),
+                    "nil" => self.add_token(TokenKind::Nil),
+                    "or" => self.add_token(TokenKind::Or),
+                    "print" => self.add_token(TokenKind::Print),
+                    "return" => self.add_token(TokenKind::Return),
+                    "super" => self.add_token(TokenKind::Super),
+                    "this" => self.add_token(TokenKind::This),
+                    "true" => self.add_token(TokenKind::True),
+                    "var" => self.add_token(TokenKind::Var),
+                    "while" => self.add_token(TokenKind::While),
+                    _ => bail!("unrecognized keyword: {}", word),
+                }
             }
             _ => bail!("scanner: unrecognized token: '{}'", ch),
         }
+
+        Ok(())
     }
 
     fn consume_whitespace(&mut self) {
-        while self.try_eat_next(is_whitespace()).is_some() {}
+        self.consume_while(is_whitespace())
     }
 
-    fn token(&self, kind: TokenKind) -> Result<Token> {
-        Ok(Token { kind })
+    fn consume_single_line_comment(&mut self) {
+        self.consume_while(is_not_newline())
+    }
+
+    fn consume_while(&mut self, predicate: impl Fn(char) -> bool) {
+        while self.try_eat_next(&predicate).is_some() {}
+    }
+
+    fn add_token(&mut self, kind: TokenKind) {
+        let new_token = Token { kind };
+        self.tokens.push(new_token)
     }
 
     fn eat_next(&mut self) -> char {
@@ -181,7 +250,7 @@ mod tests {
     }
 
     struct ErrorMsgMatcher {
-        expected: String,
+        expected: std::string::String,
     }
 
     impl Matcher for ErrorMsgMatcher {
@@ -343,13 +412,59 @@ mod tests {
             TestCase {
                 name: "failure - invalid character after a number",
                 input: "0d",
-                assertion: error_msg_eq!("unrecognized token: 'd'"),
+                assertion: error_msg_eq!("unrecognized keyword: d"),
             },
         )
     }
 
     #[test]
-    fn addition() {
+    fn string_literal() {
+        run_tests!(
+            TestCase {
+                name: "success - single char string",
+                input: r#"
+                    "a"
+                "#,
+                assertion: token_kinds_eq!(String("a".to_string()), EndOfFile),
+            },
+            TestCase {
+                name: "success - multi char string",
+                input: r#"
+                    "test string"
+                "#,
+                assertion: token_kinds_eq!(String("test string".to_string()), EndOfFile),
+            },
+            TestCase {
+                name: "success - string with numbers and symbols",
+                input: r#"
+                    "abc !@ 会意 3ab.d"
+                "#,
+                assertion: token_kinds_eq!(String("abc !@ 会意 3ab.d".to_string()), EndOfFile),
+            },
+            TestCase {
+                name: "success - string concat",
+                input: r#"
+                    "a" + "bbb"
+                "#,
+                assertion: token_kinds_eq!(
+                    String("a".to_string()),
+                    Plus,
+                    String("bbb".to_string()),
+                    EndOfFile
+                ),
+            },
+            TestCase {
+                name: "failure - unterminated string literal",
+                input: r#"
+                    "a + 3
+                "#,
+                assertion: error_msg_eq!("unterminated string"),
+            },
+        )
+    }
+
+    #[test]
+    fn addition_stress_test() {
         run_tests!(
             TestCase {
                 name: "success - simple addition",
@@ -389,8 +504,8 @@ mod tests {
             },
             TestCase {
                 name: "success - operators",
-                input: "-+",
-                assertion: token_kinds_eq!(Minus, Plus, EndOfFile),
+                input: "-+/*",
+                assertion: token_kinds_eq!(Minus, Plus, Slash, Star, EndOfFile),
             },
         )
     }
@@ -422,7 +537,73 @@ mod tests {
     }
 
     #[test]
-    fn errors() {
+    fn code_comments() {
+        run_tests!(
+            TestCase {
+                name: "success - division",
+                input: "/",
+                assertion: token_kinds_eq!(Slash, EndOfFile)
+            },
+            TestCase {
+                name: "success - single line comment",
+                input: "// single line comment",
+                assertion: token_kinds_eq!(EndOfFile)
+            },
+            TestCase {
+                name: "success - single line comment with slash",
+                input: r#"
+                    /
+                    // comment
+                    /
+                "#,
+                assertion: token_kinds_eq!(Slash, Slash, EndOfFile)
+            },
+        )
+    }
+
+    #[test]
+    fn keyword() {
+        run_tests!(
+            TestCase {
+                name: "success - all keywords",
+                input: r#"
+                    and
+                    class
+                    else
+                    false
+                    for
+                    fun
+                    if
+                    nil
+                    or
+                    print
+                    return
+                    super
+                    this
+                    true
+                    var
+                    while
+                "#,
+                assertion: token_kinds_eq!(
+                    And, Class, Else, False, For, Fun, If, Nil, Or, Print, Return, Super, This,
+                    True, Var, While, EndOfFile
+                )
+            },
+            TestCase {
+                name: "success - keyword expression",
+                input: "3 and true",
+                assertion: token_kinds_eq!(Number(3), And, True, EndOfFile)
+            },
+            TestCase {
+                name: "failure - invalid keyword",
+                input: "d",
+                assertion: error_msg_eq!("unrecognized keyword: d"),
+            },
+        )
+    }
+
+    #[test]
+    fn fails_on_unrecognized_input() {
         run_tests!(TestCase {
             name: "failures - unrecognized single character",
             input: "?",
